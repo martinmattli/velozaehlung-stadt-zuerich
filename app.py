@@ -336,5 +336,4 @@ st.caption(
     f"Datenquelle: [Open Data Zürich – Fuss- und Veloverkehr]({DATASET_PAGE_URL}) · "
     "Werte automatisch bei jedem Laden neu abgerufen. "
     "Dieses Projekt steht in keiner Verbindung zur Stadt Zürich."
-    "Published by Martin Mattli https://www.linkedin.com/in/martin-mattli-441432b7/."
-)
+    "Published by Martin Mattli https://www.linkedin.com/in/martin-mattli-441432b7/." )
