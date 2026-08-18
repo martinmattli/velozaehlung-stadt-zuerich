@@ -31,6 +31,10 @@ DATASET_PAGE_URL = (
 )
 CSV_URL_TEMPLATE = DATASET_PAGE_URL + "/download/{year}_verkehrszaehlungen_werte_fussgaenger_velo.csv"
 
+MIV_DATASET_PAGE_URL = "https://data.stadt-zuerich.ch/dataset/sid_dav_verkehrszaehlung_miv_od2031"
+MIV_CSV_URL_TEMPLATE = MIV_DATASET_PAGE_URL + "/download/sid_dav_verkehrszaehlung_miv_OD2031_{year}.csv"
+MIV_INDEX_BASE_YEAR = 2019
+
 AVAILABLE_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -143,6 +147,33 @@ def load_year_aggregated(year: int):
     return {"loc_wd": loc_wd, "loc_tod": loc_tod, "daily": daily, "locations": locations}
 
 
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_miv_daily(year: int) -> pd.DataFrame | None:
+    """
+    Lädt MIV-Zähldaten (Autos/Motorräder) eines Jahres und aggregiert zu Tagessummen.
+    Gibt DataFrame mit Spalten [tag, miv_total] zurück, oder None bei Fehler.
+    Nur Messungen mit Status "Gemessen" werden berücksichtigt.
+    """
+    url = MIV_CSV_URL_TEMPLATE.format(year=year)
+    try:
+        raw = pd.read_csv(
+            url,
+            usecols=["MessungDatZeit", "AnzFahrzeuge", "AnzFahrzeugeStatus"],
+            encoding="utf-8-sig",
+            storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"},
+        )
+    except Exception:
+        return None
+
+    raw = raw[raw["AnzFahrzeugeStatus"] == "Gemessen"].copy()
+    raw["tag"] = pd.to_datetime(raw["MessungDatZeit"], errors="coerce").dt.date
+    raw = raw.dropna(subset=["tag"])
+    daily = raw.groupby("tag", as_index=False)["AnzFahrzeuge"].sum()
+    daily = daily.rename(columns={"AnzFahrzeuge": "miv_total"})
+    del raw
+    return daily
+
+
 def _filter_loc(table: pd.DataFrame, location: str) -> pd.DataFrame:
     if location == "Alle Zählstellen":
         return table
@@ -222,6 +253,7 @@ with st.sidebar:
             "Ø Tagestotal nach Wochentag",
             "Tagesverlauf (Uhrzeit)",
             "Tagessummen (Datumsbereich)",
+            "Velo vs. MIV (Index 2019=100)",
         ]
         view_input = st.radio(
             "Ansicht",
@@ -352,6 +384,8 @@ elif view == "Tagessummen (Datumsbereich)":
     for year, agg in sorted(datasets.items()):
         df = _filter_loc(agg["daily"], location).copy()
         df["tag"] = pd.to_datetime(df["tag"])
+        # Bei "Alle Zählstellen" gibt es mehrere Zeilen pro Tag → erst summieren
+        df = df.groupby("tag", as_index=False)[sum_col].sum()
         df = df.sort_values("tag")
         df = df[(df["tag"].dt.month >= start_month) & (df["tag"].dt.month <= end_month)]
         df["Datum"] = df["tag"].dt.strftime("%m-%d")
@@ -444,6 +478,110 @@ else:
     )
     fig.update_layout(yaxis_title=y_title)
     st.plotly_chart(fig, use_container_width=True)
+
+
+# ---------------------------------------------------------------------------
+# Velo vs. MIV Index-Vergleich
+# ---------------------------------------------------------------------------
+
+if view == "Velo vs. MIV (Index 2019=100)":
+    st.info(
+        f"Beide Verkehrsträger werden auf das Basisjahr {MIV_INDEX_BASE_YEAR} = 100 normiert. "
+        "So ist direkt ablesbar, ob Velos stärker gewachsen oder gesunken sind als der Autoverkehr — "
+        "unabhängig von den sehr unterschiedlichen absoluten Zählwerten."
+    )
+
+    years_to_load = sorted(set(selected_years) | {MIV_INDEX_BASE_YEAR})
+
+    with st.spinner("Lade MIV-Daten (Motorfahrzeuge) von Open Data Zürich …"):
+        miv_daily = {}
+        for y in years_to_load:
+            df = load_miv_daily(y)
+            if df is not None:
+                miv_daily[y] = df
+            elif y != MIV_INDEX_BASE_YEAR:
+                st.warning(f"MIV-Daten {y} nicht verfügbar.")
+
+    if MIV_INDEX_BASE_YEAR not in miv_daily:
+        st.error(f"Basisjahr {MIV_INDEX_BASE_YEAR} für MIV nicht verfügbar — Index kann nicht berechnet werden.")
+        st.stop()
+
+    def monthly_avg(daily_df: pd.DataFrame, val_col: str) -> pd.Series:
+        """Ø pro Tag pro Monat (Tagessumme / Anzahl Tage im Monat)."""
+        d = daily_df.copy()
+        d["tag"] = pd.to_datetime(d["tag"])
+        d["monat"] = d["tag"].dt.month
+        return d.groupby("monat")[val_col].mean()
+
+    # Velo: stadtweite Tagessummen aus bereits geladenen datasets
+    velo_daily_by_year = {}
+    for y, agg in datasets.items():
+        df = agg["daily"].copy()
+        df["tag"] = pd.to_datetime(df["tag"])
+        velo_daily_by_year[y] = df.groupby("tag", as_index=False)[sum_col].sum().rename(columns={sum_col: "velo_total"})
+
+    # Basisjahr-Monatsmittel
+    if MIV_INDEX_BASE_YEAR not in velo_daily_by_year:
+        # Basisjahr Velo nachladen falls nicht in datasets
+        with st.spinner(f"Lade Velo-Basisdaten {MIV_INDEX_BASE_YEAR} …"):
+            base_agg = load_year_aggregated(MIV_INDEX_BASE_YEAR)
+        if base_agg:
+            base_df = base_agg["daily"].copy()
+            base_df["tag"] = pd.to_datetime(base_df["tag"])
+            velo_daily_by_year[MIV_INDEX_BASE_YEAR] = base_df.groupby("tag", as_index=False)[sum_col].sum().rename(columns={sum_col: "velo_total"})
+
+    velo_base = monthly_avg(velo_daily_by_year[MIV_INDEX_BASE_YEAR], "velo_total")
+    miv_base = monthly_avg(miv_daily[MIV_INDEX_BASE_YEAR], "miv_total")
+
+    MONTH_NAMES_IDX = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
+                       "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+    colors = px.colors.qualitative.Plotly
+    fig = go.Figure()
+
+    for i, year in enumerate(sorted(selected_years)):
+        color = colors[i % len(colors)]
+        year_label = str(year)
+
+        # Velo-Index
+        if year in velo_daily_by_year:
+            velo_monthly = monthly_avg(velo_daily_by_year[year], "velo_total")
+            velo_idx = (velo_monthly / velo_base * 100).reindex(range(1, 13))
+            fig.add_trace(go.Scatter(
+                x=[MONTH_NAMES_IDX[m - 1] for m in velo_idx.index],
+                y=velo_idx.values,
+                mode="lines+markers",
+                name=f"Velo {year_label}",
+                line=dict(color=color, width=2.5, dash="solid"),
+                legendgroup=year_label,
+            ))
+
+        # MIV-Index
+        if year in miv_daily:
+            miv_monthly = monthly_avg(miv_daily[year], "miv_total")
+            miv_idx = (miv_monthly / miv_base * 100).reindex(range(1, 13))
+            fig.add_trace(go.Scatter(
+                x=[MONTH_NAMES_IDX[m - 1] for m in miv_idx.index],
+                y=miv_idx.values,
+                mode="lines+markers",
+                name=f"MIV {year_label}",
+                line=dict(color=color, width=2.5, dash="dot"),
+                legendgroup=year_label,
+            ))
+
+    fig.add_hline(y=100, line_dash="dash", line_color="gray", line_width=1,
+                  annotation_text=f"Basis {MIV_INDEX_BASE_YEAR}", annotation_position="top left")
+    fig.update_layout(
+        yaxis_title=f"Index ({MIV_INDEX_BASE_YEAR} = 100)",
+        legend_title="Verkehrsträger · Jahr",
+        hovermode="x unified",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption(
+        f"Velo: durchgezogene Linie · MIV (Motorfahrzeuge): gepunktete Linie · "
+        f"Basisjahr {MIV_INDEX_BASE_YEAR} = 100. "
+        f"Velo-Datenquelle: [Open Data Zürich – Fuss-/Veloverkehr]({DATASET_PAGE_URL}). "
+        f"MIV-Datenquelle: [Open Data Zürich – MIV Verkehrszählung]({MIV_DATASET_PAGE_URL})."
+    )
 
 st.divider()
 st.caption(
