@@ -16,6 +16,7 @@ Lokal starten:
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 # ---------------------------------------------------------------------------
@@ -323,34 +324,64 @@ if view == "Jahrestotal":
 elif view == "Tagessummen (Datumsbereich)":
     MONTH_NAMES = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
                    "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
-    month_range = st.select_slider(
-        "Monatszeitraum",
-        options=MONTH_NAMES,
-        value=("Jan", "Dez"),
-    )
+    col_slider, col_toggle = st.columns([3, 1])
+    with col_slider:
+        month_range = st.select_slider(
+            "Monatszeitraum — wirkt sofort",
+            options=MONTH_NAMES,
+            value=("Jan", "Dez"),
+        )
+    with col_toggle:
+        show_rolling = st.toggle("7-Tage-Mittel", value=True)
+
     start_month = MONTH_NAMES.index(month_range[0]) + 1
     end_month = MONTH_NAMES.index(month_range[1]) + 1
 
-    long_rows = []
+    year_dfs = {}
     for year, agg in sorted(datasets.items()):
         df = _filter_loc(agg["daily"], location).copy()
         df["tag"] = pd.to_datetime(df["tag"])
+        df = df.sort_values("tag")
         df = df[(df["tag"].dt.month >= start_month) & (df["tag"].dt.month <= end_month)]
         df["Datum"] = df["tag"].dt.strftime("%m-%d")
-        df["Jahr"] = str(year)
-        df = df.rename(columns={sum_col: "Tagessumme"})
-        long_rows.append(df[["Datum", "Tagessumme", "Jahr"]])
+        df["rolling7"] = df[sum_col].rolling(7, center=True, min_periods=1).mean()
+        year_dfs[str(year)] = df
 
-    if long_rows:
-        chart_df = pd.concat(long_rows).sort_values("Datum")
-        fig = px.line(chart_df, x="Datum", y="Tagessumme", color="Jahr")
+    if year_dfs:
+        colors = px.colors.qualitative.Plotly
+        fig = go.Figure()
+        for i, (year_str, df) in enumerate(year_dfs.items()):
+            color = colors[i % len(colors)]
+            # Rohdaten — dünn, transparent
+            fig.add_trace(go.Scatter(
+                x=df["Datum"], y=df[sum_col],
+                mode="lines", name=year_str,
+                line=dict(color=color, width=1),
+                opacity=0.35,
+                legendgroup=year_str,
+                showlegend=not show_rolling,
+            ))
+            if show_rolling:
+                # 7-Tage-Rollmittel — dick, opak
+                fig.add_trace(go.Scatter(
+                    x=df["Datum"], y=df["rolling7"],
+                    mode="lines", name=year_str,
+                    line=dict(color=color, width=2.5),
+                    legendgroup=year_str,
+                    showlegend=True,
+                ))
         fig.update_xaxes(
             tickangle=45,
             tickvals=[f"{m:02d}-01" for m in range(start_month, end_month + 1)],
             ticktext=[MONTH_NAMES[m - 1] for m in range(start_month, end_month + 1)],
         )
-        fig.update_layout(yaxis_title="Tagessumme Velos")
+        fig.update_layout(
+            yaxis_title="Tagessumme Velos",
+            legend_title="Jahr",
+        )
         st.plotly_chart(fig, use_container_width=True)
+        if show_rolling:
+            st.caption("Dicke Linie: 7-Tage-Rollmittel (zentriert). Dünne Linie: Rohdaten.")
     else:
         st.info("Keine Daten für diesen Zeitraum.")
 
