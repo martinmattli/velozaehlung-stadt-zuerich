@@ -16,24 +16,149 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from utils import (
-    AVAILABLE_YEARS,
-    DATASET_PAGE_URL,
-    WEEKDAY_LABELS_DE,
-    WEEKDAY_ORDER,
-    _filter_loc,
-    load_year_aggregated,
-    time_of_day_avg,
-    weekday_daily_avg,
-    weekday_quarter_avg,
-    year_totals,
-)
-
 # ---------------------------------------------------------------------------
-# Seitenkonfiguration
+# Konfiguration
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="Velozählungen Zürich", layout="wide")
+
+DATASET_PAGE_URL = (
+    "https://data.stadt-zuerich.ch/dataset/"
+    "ted_taz_verkehrszaehlungen_werte_fussgaenger_velo"
+)
+CSV_URL_TEMPLATE = DATASET_PAGE_URL + "/download/{year}_verkehrszaehlungen_werte_fussgaenger_velo.csv"
+
+AVAILABLE_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+
+WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+WEEKDAY_LABELS_DE = {
+    "Monday": "Mo", "Tuesday": "Di", "Wednesday": "Mi", "Thursday": "Do",
+    "Friday": "Fr", "Saturday": "Sa", "Sunday": "So",
+}
+
+
+# ---------------------------------------------------------------------------
+# Daten laden & aufbereiten
+# ---------------------------------------------------------------------------
+
+def find_column(columns, keywords):
+    for kw in keywords:
+        for c in columns:
+            if kw in c.lower():
+                return c
+    return None
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_year_aggregated(year: int):
+    url = CSV_URL_TEMPLATE.format(year=year)
+    try:
+        raw = pd.read_csv(url, storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"})
+    except Exception:
+        return None
+
+    cols = raw.columns.tolist()
+    date_col = find_column(cols, ["datum", "zeitstempel", "messung"])
+    velo_in_col = find_column(cols, ["velo_in", "velo"])
+    velo_out_col = find_column(cols, ["velo_out"])
+    standort_col = find_column(cols, ["fk_standort", "fk_zaehler", "standort"])
+
+    if date_col is None or velo_in_col is None:
+        return None
+
+    keep = [date_col, velo_in_col]
+    if velo_out_col:
+        keep.append(velo_out_col)
+    if standort_col:
+        keep.append(standort_col)
+
+    df = raw[keep].copy()
+    del raw
+
+    rename_map = {date_col: "datum", velo_in_col: "velo_in"}
+    if velo_out_col:
+        rename_map[velo_out_col] = "velo_out"
+    if standort_col:
+        rename_map[standort_col] = "standort"
+    df = df.rename(columns=rename_map)
+
+    df = df.dropna(subset=["datum", "velo_in"])
+    df["datum"] = pd.to_datetime(df["datum"], errors="coerce")
+    df = df.dropna(subset=["datum"])
+
+    if "velo_out" not in df.columns:
+        df["velo_out"] = 0
+    df["velo_out"] = df["velo_out"].fillna(0)
+    df["velo_total"] = df["velo_in"] + df["velo_out"]
+
+    if "standort" not in df.columns:
+        df["standort"] = "ALL"
+    df["standort"] = df["standort"].astype(str)
+
+    df["wochentag"] = df["datum"].dt.day_name()
+    df["uhrzeit"] = df["datum"].dt.strftime("%H:%M")
+    df["tag"] = df["datum"].dt.date
+
+    loc_wd = (
+        df.groupby(["standort", "wochentag"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"), n=("velo_in", "size"))
+        .reset_index()
+    )
+    loc_tod = (
+        df.groupby(["standort", "uhrzeit"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"), n=("velo_in", "size"))
+        .reset_index()
+    )
+    daily = (
+        df.groupby(["standort", "tag"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"))
+        .reset_index()
+    )
+    daily["wochentag"] = pd.to_datetime(daily["tag"]).dt.day_name()
+
+    locations = sorted(df["standort"].unique())
+    del df
+
+    return {"loc_wd": loc_wd, "loc_tod": loc_tod, "daily": daily, "locations": locations}
+
+
+def _filter_loc(table: pd.DataFrame, location: str) -> pd.DataFrame:
+    if location == "Alle Zählstellen":
+        return table
+    return table[table["standort"] == location]
+
+
+def weekday_quarter_avg(loc_wd, location, sum_col):
+    df = _filter_loc(loc_wd, location)
+    g = df.groupby("wochentag")[[sum_col, "n"]].sum()
+    return (g[sum_col] / g["n"]).reindex(WEEKDAY_ORDER)
+
+
+def time_of_day_avg(loc_tod, location, sum_col):
+    df = _filter_loc(loc_tod, location)
+    g = df.groupby("uhrzeit")[[sum_col, "n"]].sum()
+    return (g[sum_col] / g["n"]).sort_index()
+
+
+def weekday_daily_avg(daily, location, sum_col):
+    df = _filter_loc(daily, location)
+    per_tag = df.groupby("tag")[sum_col].sum()
+    wd_map = df.groupby("tag")["wochentag"].first()
+    combined = pd.DataFrame({"total": per_tag, "wochentag": wd_map})
+    return combined.groupby("wochentag")["total"].mean().reindex(WEEKDAY_ORDER)
+
+
+def year_totals(daily, location, sum_col):
+    df = _filter_loc(daily, location)
+    total = df[sum_col].sum()
+    days = df["tag"].nunique()
+    avg_per_day = total / days if days > 0 else 0
+    return total, days, avg_per_day
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
 
 st.title("🚲 Velozählungen Zürich — Jahresvergleich")
 
@@ -43,10 +168,6 @@ st.warning(
     "wird keine Verantwortung übernommen. Bei Fragen zu den Rohdaten wende dich an die "
     f"[Datenquelle: Open Data Zürich – Fuss- und Veloverkehr]({DATASET_PAGE_URL})."
 )
-
-# ---------------------------------------------------------------------------
-# Sidebar / Filter
-# ---------------------------------------------------------------------------
 
 with st.sidebar:
     st.header("Filter")
@@ -94,10 +215,6 @@ with st.sidebar:
         st.session_state["view"] = view_input
         st.session_state["location"] = location_input
 
-# ---------------------------------------------------------------------------
-# Daten laden
-# ---------------------------------------------------------------------------
-
 selected_years = st.session_state.get("years", [y for y in AVAILABLE_YEARS if y in (2024, 2025)])
 metric_label = st.session_state.get("metric_label", "Zufahrt (VELO_IN)")
 view = st.session_state.get("view", "Jahrestotal")
@@ -120,7 +237,6 @@ if not datasets:
     st.error("Keine Daten laden können. Bitte später erneut versuchen oder Datenquelle prüfen.")
     st.stop()
 
-# Zählstellen in session_state aktualisieren
 all_locations = sorted(set().union(*[set(d["locations"]) for d in datasets.values()]))
 st.session_state["available_locations"] = all_locations
 
@@ -263,7 +379,7 @@ else:
         elif view == "Ø Tagestotal nach Wochentag":
             series = weekday_daily_avg(agg["daily"], location, sum_col)
             x_label = "Wochentag"
-        else:  # Tagesverlauf
+        else:
             series = time_of_day_avg(agg["loc_tod"], location, sum_col)
             x_label = "Uhrzeit"
 
