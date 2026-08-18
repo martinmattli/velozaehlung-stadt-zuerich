@@ -15,8 +15,6 @@ import streamlit as st
 # Konfiguration
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title="Velo vs. MIV – Zürich", layout="wide")
-
 DATASET_PAGE_URL = (
     "https://data.stadt-zuerich.ch/dataset/"
     "ted_taz_verkehrszaehlungen_werte_fussgaenger_velo"
