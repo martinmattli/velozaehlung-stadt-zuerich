@@ -197,23 +197,45 @@ st.warning(
 
 with st.sidebar:
     st.header("Filter")
-    selected_years = st.multiselect(
-        "Jahre", AVAILABLE_YEARS, default=[y for y in AVAILABLE_YEARS if y in (2024, 2025)]
-    )
-    metric_label = st.radio("Messwert", ["Zufahrt (VELO_IN)", "Total (IN + OUT)"])
-    metric_col = "velo_in" if metric_label.startswith("Zufahrt") else "velo_total"
-    view = st.radio(
-        "Ansicht",
-        [
+    with st.form("filter_form"):
+        selected_years_input = st.multiselect(
+            "Jahre",
+            AVAILABLE_YEARS,
+            default=st.session_state.get("years", [y for y in AVAILABLE_YEARS if y in (2024, 2025)]),
+        )
+        metric_label_input = st.radio(
+            "Messwert",
+            ["Zufahrt (VELO_IN)", "Total (IN + OUT)"],
+            index=["Zufahrt (VELO_IN)", "Total (IN + OUT)"].index(
+                st.session_state.get("metric_label", "Zufahrt (VELO_IN)")
+            ),
+        )
+        view_options = [
+            "Jahrestotal",
             "Ø pro Viertelstunde nach Wochentag",
             "Ø Tagestotal nach Wochentag",
             "Tagesverlauf (Uhrzeit)",
-            "Jahrestotal",
-        ],
-    )
+        ]
+        view_input = st.radio(
+            "Ansicht",
+            view_options,
+            index=view_options.index(st.session_state.get("view", "Jahrestotal")),
+        )
+        submitted = st.form_submit_button("📥 Daten laden", use_container_width=True)
+
+    if submitted:
+        st.session_state["years"] = selected_years_input
+        st.session_state["metric_label"] = metric_label_input
+        st.session_state["view"] = view_input
+
+# Erstmaliger Aufruf (vor jedem Klick auf "Daten laden"): sinnvolle Defaults verwenden
+selected_years = st.session_state.get("years", [y for y in AVAILABLE_YEARS if y in (2024, 2025)])
+metric_label = st.session_state.get("metric_label", "Zufahrt (VELO_IN)")
+view = st.session_state.get("view", "Jahrestotal")
+metric_col = "velo_in" if metric_label.startswith("Zufahrt") else "velo_total"
 
 if not selected_years:
-    st.info("Bitte mindestens ein Jahr in der Seitenleiste auswählen.")
+    st.info("Bitte mindestens ein Jahr auswählen und auf 'Daten laden' klicken.")
     st.stop()
 
 datasets = {}
@@ -239,15 +261,31 @@ sum_col = "vi_sum" if metric_col == "velo_in" else "vt_sum"
 # ---------------------------------------------------------------------------
 
 if view == "Jahrestotal":
-    cols = st.columns(len(datasets))
     rows = []
-    for (year, agg), col in zip(sorted(datasets.items()), cols):
+    for year, agg in sorted(datasets.items()):
         total, days, avg_per_day = year_totals(agg["daily"], location, sum_col)
-        col.metric(f"{year}", f"{avg_per_day:,.0f} / Tag".replace(",", "'"))
-        col.caption(f"Summe: {total:,.0f}".replace(",", "'") + f" · {days} erfasste Tage")
-        rows.append({"Jahr": str(year), "Ø pro Tag": avg_per_day})
+        rows.append(
+            {
+                "Jahr": year,
+                "Ø pro Tag": round(avg_per_day),
+                "Summe (erfasster Zeitraum)": round(total),
+                "Erfasste Tage": days,
+            }
+        )
 
-    chart_df = pd.DataFrame(rows)
+    summary_df = pd.DataFrame(rows)
+
+    # Tabelle statt Spalten-Layout, damit auch viele Jahre nicht abgeschnitten werden
+    st.dataframe(
+        summary_df.style.format(
+            {"Ø pro Tag": "{:,.0f}", "Summe (erfasster Zeitraum)": "{:,.0f}"}
+        ).format({"Jahr": "{:d}"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart_df = summary_df.rename(columns={"Jahr": "JahrLabel"})
+    chart_df["Jahr"] = chart_df["JahrLabel"].astype(str)
     fig = px.bar(chart_df, x="Jahr", y="Ø pro Tag", color="Jahr", text_auto=".0f")
     fig.update_layout(showlegend=False, yaxis_title="Ø Velos pro erfasstem Tag")
     st.plotly_chart(fig, use_container_width=True)
@@ -292,8 +330,6 @@ else:
     )
     fig.update_layout(yaxis_title=y_title)
     st.plotly_chart(fig, use_container_width=True)
-
-st.divider()
 
 st.divider()
 st.caption(
