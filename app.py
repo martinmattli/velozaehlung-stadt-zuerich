@@ -220,6 +220,7 @@ with st.sidebar:
             "Ø pro Viertelstunde nach Wochentag",
             "Ø Tagestotal nach Wochentag",
             "Tagesverlauf (Uhrzeit)",
+            "Tagessummen (Datumsbereich)",
         ]
         view_input = st.radio(
             "Ansicht",
@@ -250,61 +251,14 @@ if not selected_years:
     st.info("Bitte mindestens ein Jahr auswählen und auf 'Daten laden' klicken.")
     st.stop()
 
-# --- Zentrierter Ladeindikator mit abgedunkeltem Hintergrund ---
-overlay = st.empty()
-overlay.markdown(
-    """
-    <style>
-    .velo-loading-overlay {
-        position: fixed;
-        top: 0; left: 0;
-        width: 100vw; height: 100vh;
-        background: rgba(27, 42, 58, 0.35);
-        z-index: 9999;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        flex-direction: column;
-    }
-    .velo-spinner {
-        border: 6px solid rgba(255,255,255,0.5);
-        border-top: 6px solid #EB0000;
-        border-radius: 50%;
-        width: 56px; height: 56px;
-        animation: velo-spin 0.9s linear infinite;
-    }
-    @keyframes velo-spin {
-        0%   { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
-    .velo-loading-text {
-        margin-top: 16px;
-        font-family: 'Helvetica Neue', Arial, sans-serif;
-        font-size: 15px;
-        font-weight: 600;
-        color: #fff;
-        background: #1B2A3A;
-        padding: 6px 14px;
-        border-radius: 4px;
-    }
-    </style>
-    <div class="velo-loading-overlay">
-        <div class="velo-spinner"></div>
-        <div class="velo-loading-text">Lade Velozähldaten von Open Data Zürich …</div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
 datasets = {}
-for year in selected_years:
-    agg = load_year_aggregated(year)
-    if agg is None:
-        st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
-        continue
-    datasets[year] = agg
-
-overlay.empty()  # Ladeindikator wieder entfernen, sobald alle Jahre verarbeitet sind
+with st.spinner("Lade Velozähldaten von Open Data Zürich …"):
+    for year in selected_years:
+        agg = load_year_aggregated(year)
+        if agg is None:
+            st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
+            continue
+        datasets[year] = agg
 
 if not datasets:
     st.error("Keine Daten laden können. Bitte später erneut versuchen oder Datenquelle prüfen.")
@@ -330,9 +284,15 @@ if view == "Jahrestotal":
     rows = []
     for year, agg in sorted(datasets.items()):
         total, days, avg_per_day = year_totals(agg["daily"], location, sum_col)
+        n_total = len(agg["locations"])
+        if location == "Alle Zählstellen":
+            zaehler_label = str(n_total)
+        else:
+            zaehler_label = f"1 / {n_total}"
         rows.append(
             {
                 "Jahr": year,
+                "Zählstellen": zaehler_label,
                 "Ø pro Tag": round(avg_per_day),
                 "Summe (erfasster Zeitraum)": round(total),
                 "Erfasste Tage": days,
@@ -359,6 +319,40 @@ if view == "Jahrestotal":
         "Ø pro Tag statt reiner Jahressumme, damit unvollständig erfasste Jahre "
         "(z.B. laufendes Jahr) fair vergleichbar bleiben."
     )
+
+elif view == "Tagessummen (Datumsbereich)":
+    MONTH_NAMES = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
+                   "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+    month_range = st.select_slider(
+        "Monatszeitraum",
+        options=MONTH_NAMES,
+        value=("Jan", "Dez"),
+    )
+    start_month = MONTH_NAMES.index(month_range[0]) + 1
+    end_month = MONTH_NAMES.index(month_range[1]) + 1
+
+    long_rows = []
+    for year, agg in sorted(datasets.items()):
+        df = _filter_loc(agg["daily"], location).copy()
+        df["tag"] = pd.to_datetime(df["tag"])
+        df = df[(df["tag"].dt.month >= start_month) & (df["tag"].dt.month <= end_month)]
+        df["Datum"] = df["tag"].dt.strftime("%m-%d")
+        df["Jahr"] = str(year)
+        df = df.rename(columns={sum_col: "Tagessumme"})
+        long_rows.append(df[["Datum", "Tagessumme", "Jahr"]])
+
+    if long_rows:
+        chart_df = pd.concat(long_rows).sort_values("Datum")
+        fig = px.line(chart_df, x="Datum", y="Tagessumme", color="Jahr")
+        fig.update_xaxes(
+            tickangle=45,
+            tickvals=[f"{m:02d}-01" for m in range(start_month, end_month + 1)],
+            ticktext=[MONTH_NAMES[m - 1] for m in range(start_month, end_month + 1)],
+        )
+        fig.update_layout(yaxis_title="Tagessumme Velos")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Keine Daten für diesen Zeitraum.")
 
 else:
     long_rows = []
