@@ -238,21 +238,77 @@ if not selected_years:
     st.info("Bitte mindestens ein Jahr auswählen und auf 'Daten laden' klicken.")
     st.stop()
 
+# --- Zentrierter Ladeindikator mit abgedunkeltem Hintergrund ---
+overlay = st.empty()
+overlay.markdown(
+    """
+    <style>
+    .velo-loading-overlay {
+        position: fixed;
+        top: 0; left: 0;
+        width: 100vw; height: 100vh;
+        background: rgba(27, 42, 58, 0.35);
+        z-index: 9999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+    }
+    .velo-spinner {
+        border: 6px solid rgba(255,255,255,0.5);
+        border-top: 6px solid #EB0000;
+        border-radius: 50%;
+        width: 56px; height: 56px;
+        animation: velo-spin 0.9s linear infinite;
+    }
+    @keyframes velo-spin {
+        0%   { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    .velo-loading-text {
+        margin-top: 16px;
+        font-family: 'Helvetica Neue', Arial, sans-serif;
+        font-size: 15px;
+        font-weight: 600;
+        color: #fff;
+        background: #1B2A3A;
+        padding: 6px 14px;
+        border-radius: 4px;
+    }
+    </style>
+    <div class="velo-loading-overlay">
+        <div class="velo-spinner"></div>
+        <div class="velo-loading-text">Lade Velozähldaten von Open Data Zürich …</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 datasets = {}
-with st.spinner("Lade Daten von Open Data Zürich ..."):
-    for year in selected_years:
-        agg = load_year_aggregated(year)
-        if agg is None:
-            st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
-            continue
-        datasets[year] = agg
+for year in selected_years:
+    agg = load_year_aggregated(year)
+    if agg is None:
+        st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
+        continue
+    datasets[year] = agg
+
+overlay.empty()  # Ladeindikator wieder entfernen, sobald alle Jahre verarbeitet sind
 
 if not datasets:
     st.error("Keine Daten laden können. Bitte später erneut versuchen oder Datenquelle prüfen.")
     st.stop()
 
+# --- Zählstellen-Filter: wirkt sofort, ohne erneutes Laden, Default = Alle ---
 all_locations = sorted(set().union(*[set(d["locations"]) for d in datasets.values()]))
-location = st.sidebar.selectbox("Zählstelle", ["Alle Zählstellen"] + all_locations)
+location_options = ["Alle Zählstellen"] + all_locations
+
+if "location" not in st.session_state or st.session_state["location"] not in location_options:
+    st.session_state["location"] = "Alle Zählstellen"
+
+with st.sidebar:
+    st.divider()
+    location = st.selectbox("Zählstelle", location_options, key="location")
+    st.caption("Wirkt sofort, ohne erneutes Laden.")
 
 sum_col = "vi_sum" if metric_col == "velo_in" else "vt_sum"
 
