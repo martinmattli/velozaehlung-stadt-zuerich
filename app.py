@@ -197,6 +197,11 @@ st.warning(
 
 with st.sidebar:
     st.header("Filter")
+    _cached_locations = st.session_state.get("available_locations", [])
+    _location_options_form = ["Alle Zählstellen"] + _cached_locations
+    _current_loc = st.session_state.get("location", "Alle Zählstellen")
+    _loc_idx = _location_options_form.index(_current_loc) if _current_loc in _location_options_form else 0
+
     with st.form("filter_form"):
         selected_years_input = st.multiselect(
             "Jahre",
@@ -221,12 +226,19 @@ with st.sidebar:
             view_options,
             index=view_options.index(st.session_state.get("view", "Jahrestotal")),
         )
+        location_input = st.selectbox(
+            "Zählstelle",
+            _location_options_form,
+            index=_loc_idx,
+            help="Wird nach dem ersten Laden mit allen verfügbaren Zählstellen befüllt.",
+        )
         submitted = st.form_submit_button("📥 Daten laden", use_container_width=True)
 
     if submitted:
         st.session_state["years"] = selected_years_input
         st.session_state["metric_label"] = metric_label_input
         st.session_state["view"] = view_input
+        st.session_state["location"] = location_input
 
 # Erstmaliger Aufruf (vor jedem Klick auf "Daten laden"): sinnvolle Defaults verwenden
 selected_years = st.session_state.get("years", [y for y in AVAILABLE_YEARS if y in (2024, 2025)])
@@ -298,17 +310,15 @@ if not datasets:
     st.error("Keine Daten laden können. Bitte später erneut versuchen oder Datenquelle prüfen.")
     st.stop()
 
-# --- Zählstellen-Filter: wirkt sofort, ohne erneutes Laden, Default = Alle ---
+# --- Zählstellen: verfügbare Standorte in session_state aktualisieren ---
 all_locations = sorted(set().union(*[set(d["locations"]) for d in datasets.values()]))
+st.session_state["available_locations"] = all_locations
+
 location_options = ["Alle Zählstellen"] + all_locations
-
-if "location" not in st.session_state or st.session_state["location"] not in location_options:
-    st.session_state["location"] = "Alle Zählstellen"
-
-with st.sidebar:
-    st.divider()
-    location = st.selectbox("Zählstelle", location_options, key="location")
-    st.caption("Wirkt sofort, ohne erneutes Laden.")
+location = st.session_state.get("location", "Alle Zählstellen")
+if location not in location_options:
+    location = "Alle Zählstellen"
+    st.session_state["location"] = location
 
 sum_col = "vi_sum" if metric_col == "velo_in" else "vt_sum"
 
