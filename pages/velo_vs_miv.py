@@ -41,7 +41,8 @@ def find_column(columns, keywords):
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_velo_daily(year: int) -> pd.DataFrame | None:
+def load_velo_daily(year: int):
+    """Gibt dict mit 'daily' (DataFrame) und 'n_stations' (int) zurück, oder None."""
     url = CSV_URL_TEMPLATE.format(year=year)
     try:
         raw = pd.read_csv(url, storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"})
@@ -51,28 +52,38 @@ def load_velo_daily(year: int) -> pd.DataFrame | None:
     cols = raw.columns.tolist()
     date_col = find_column(cols, ["datum", "zeitstempel", "messung"])
     velo_in_col = find_column(cols, ["velo_in", "velo"])
+    standort_col = find_column(cols, ["fk_standort", "fk_zaehler", "standort"])
     if date_col is None or velo_in_col is None:
         return None
 
-    df = raw[[date_col, velo_in_col]].copy()
+    keep = [date_col, velo_in_col]
+    if standort_col:
+        keep.append(standort_col)
+    df = raw[keep].copy()
     del raw
+
     df = df.rename(columns={date_col: "datum", velo_in_col: "velo_in"})
+    if standort_col:
+        df = df.rename(columns={standort_col: "standort"})
     df = df.dropna(subset=["datum", "velo_in"])
     df["datum"] = pd.to_datetime(df["datum"], errors="coerce")
     df = df.dropna(subset=["datum"])
     df["tag"] = df["datum"].dt.date
+
+    n_stations = df["standort"].nunique() if "standort" in df.columns else 1
     daily = df.groupby("tag", as_index=False)["velo_in"].sum().rename(columns={"velo_in": "velo_total"})
     del df
-    return daily
+    return {"daily": daily, "n_stations": n_stations}
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_miv_daily(year: int) -> pd.DataFrame | None:
+def load_miv_daily(year: int):
+    """Gibt dict mit 'daily' (DataFrame) und 'n_stations' (int) zurück, oder None."""
     url = MIV_CSV_URL_TEMPLATE.format(year=year)
     try:
         raw = pd.read_csv(
             url,
-            usecols=["MessungDatZeit", "AnzFahrzeuge", "AnzFahrzeugeStatus"],
+            usecols=["MessungDatZeit", "AnzFahrzeuge", "AnzFahrzeugeStatus", "ZSID"],
             encoding="utf-8-sig",
             storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"},
         )
@@ -82,10 +93,11 @@ def load_miv_daily(year: int) -> pd.DataFrame | None:
     raw = raw[raw["AnzFahrzeugeStatus"] == "Gemessen"].copy()
     raw["tag"] = pd.to_datetime(raw["MessungDatZeit"], errors="coerce").dt.date
     raw = raw.dropna(subset=["tag"])
+    n_stations = raw["ZSID"].nunique()
     daily = raw.groupby("tag", as_index=False)["AnzFahrzeuge"].sum()
     daily = daily.rename(columns={"AnzFahrzeuge": "miv_total"})
     del raw
-    return daily
+    return {"daily": daily, "n_stations": n_stations}
 
 
 def monthly_avg(daily_df: pd.DataFrame, val_col: str) -> pd.Series:
@@ -133,18 +145,21 @@ years_to_load = sorted(set(selected_years) | {MIV_INDEX_BASE_YEAR})
 velo_by_year = {}
 with st.spinner("Lade Velodaten …"):
     for y in years_to_load:
-        df = load_velo_daily(y)
-        if df is not None:
-            velo_by_year[y] = df
+        result = load_velo_daily(y)
+        if result is not None:
+            velo_by_year[y] = result
 
 miv_by_year = {}
 with st.spinner("Lade MIV-Daten (Motorfahrzeuge) …"):
     for y in years_to_load:
-        df = load_miv_daily(y)
-        if df is not None:
-            miv_by_year[y] = df
+        result = load_miv_daily(y)
+        if result is not None:
+            miv_by_year[y] = result
         elif y != MIV_INDEX_BASE_YEAR:
             st.warning(f"MIV-Daten {y} nicht verfügbar.")
+
+if submitted:
+    st.toast(f"Daten geladen: {len(velo_by_year)} Jahre Velo · {len(miv_by_year)} Jahre MIV", icon="✅")
 
 if MIV_INDEX_BASE_YEAR not in miv_by_year or MIV_INDEX_BASE_YEAR not in velo_by_year:
     st.error(f"Basisjahr {MIV_INDEX_BASE_YEAR} konnte nicht geladen werden.")
@@ -157,8 +172,8 @@ if MIV_INDEX_BASE_YEAR not in miv_by_year or MIV_INDEX_BASE_YEAR not in velo_by_
 MONTH_NAMES = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun",
                "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 
-velo_base = monthly_avg(velo_by_year[MIV_INDEX_BASE_YEAR], "velo_total")
-miv_base = monthly_avg(miv_by_year[MIV_INDEX_BASE_YEAR], "miv_total")
+velo_base = monthly_avg(velo_by_year[MIV_INDEX_BASE_YEAR]["daily"], "velo_total")
+miv_base = monthly_avg(miv_by_year[MIV_INDEX_BASE_YEAR]["daily"], "miv_total")
 
 colors = px.colors.qualitative.Plotly
 fig = go.Figure()
@@ -168,7 +183,7 @@ for i, year in enumerate(sorted(selected_years)):
     year_label = str(year)
 
     if year in velo_by_year:
-        velo_monthly = monthly_avg(velo_by_year[year], "velo_total")
+        velo_monthly = monthly_avg(velo_by_year[year]["daily"], "velo_total")
         velo_idx = (velo_monthly / velo_base * 100).reindex(range(1, 13))
         fig.add_trace(go.Scatter(
             x=[MONTH_NAMES[m - 1] for m in velo_idx.index],
@@ -180,7 +195,7 @@ for i, year in enumerate(sorted(selected_years)):
         ))
 
     if year in miv_by_year:
-        miv_monthly = monthly_avg(miv_by_year[year], "miv_total")
+        miv_monthly = monthly_avg(miv_by_year[year]["daily"], "miv_total")
         miv_idx = (miv_monthly / miv_base * 100).reindex(range(1, 13))
         fig.add_trace(go.Scatter(
             x=[MONTH_NAMES[m - 1] for m in miv_idx.index],
@@ -203,9 +218,14 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
+# Zählstellen-Angabe pro Jahr
+velo_parts = [f"{y}: {velo_by_year[y]['n_stations']}" for y in sorted(selected_years) if y in velo_by_year]
+miv_parts = [f"{y}: {miv_by_year[y]['n_stations']}" for y in sorted(selected_years) if y in miv_by_year]
 st.caption(
     f"Velo: durchgezogene Linie · MIV (Motorfahrzeuge): gepunktete Linie · "
-    f"Basisjahr {MIV_INDEX_BASE_YEAR} = 100. "
+    f"Basisjahr {MIV_INDEX_BASE_YEAR} = 100.  \n"
+    f"Velo-Zählstellen — {' · '.join(velo_parts)}  \n"
+    f"MIV-Zählstellen — {' · '.join(miv_parts)}  \n"
     f"Velo-Datenquelle: [Open Data Zürich – Fuss-/Veloverkehr]({DATASET_PAGE_URL}). "
     f"MIV-Datenquelle: [Open Data Zürich – MIV Verkehrszählung]({MIV_DATASET_PAGE_URL})."
 )
