@@ -53,26 +53,37 @@ def find_column(columns, keywords):
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def load_year_raw(year: int):
-    """Lädt die Rohdaten eines Jahres direkt von Open Data Zürich. None falls nicht verfügbar."""
+def load_year_aggregated(year: int):
+    """
+    Lädt die Rohdaten eines Jahres, bereinigt sie und verdichtet sie SOFORT zu drei
+    kleinen Aggregattabellen (ein paar hundert bis paar tausend Zeilen statt ~800'000).
+
+    Nur diese kompakten Tabellen werden gecacht - die riesige Rohtabelle existiert nur
+    kurz innerhalb dieser Funktion und wird danach freigegeben. Das hält den Speicherbedarf
+    auch bei vielen gleichzeitig ausgewählten Jahren klein (wichtig auf Streamlit Cloud,
+    wo nur ca. 1 GB RAM zur Verfügung steht).
+
+    Rückgabe: dict mit
+        "loc_wd"     -> pro (Standort, Wochentag): Summe & Anzahl Viertelstundenwerte
+        "loc_tod"    -> pro (Standort, Uhrzeit):    Summe & Anzahl Viertelstundenwerte
+        "daily"      -> pro (Standort, Tag):        Tagessumme + Wochentag
+        "locations"  -> Liste aller Standort-IDs in diesem Jahr
+    None, falls das Jahr nicht verfügbar ist oder Spalten nicht erkannt wurden.
+    """
     url = CSV_URL_TEMPLATE.format(year=year)
     try:
-        return pd.read_csv(url, storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"})
+        raw = pd.read_csv(url, storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"})
     except Exception:
         return None
 
-
-@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
-def prepare_year(df: pd.DataFrame) -> pd.DataFrame:
-    """Erkennt relevante Spalten automatisch, bereinigt Typen, ergänzt Hilfsspalten."""
-    cols = df.columns.tolist()
+    cols = raw.columns.tolist()
     date_col = find_column(cols, ["datum", "zeitstempel", "messung"])
     velo_in_col = find_column(cols, ["velo_in", "velo"])
     velo_out_col = find_column(cols, ["velo_out"])
     standort_col = find_column(cols, ["fk_standort", "fk_zaehler", "standort"])
 
     if date_col is None or velo_in_col is None:
-        raise ValueError(f"Benötigte Spalten nicht gefunden. Vorhandene Spalten: {cols}")
+        return None
 
     keep = [date_col, velo_in_col]
     if velo_out_col:
@@ -80,60 +91,92 @@ def prepare_year(df: pd.DataFrame) -> pd.DataFrame:
     if standort_col:
         keep.append(standort_col)
 
-    out = df[keep].copy()
+    df = raw[keep].copy()
+    del raw  # Rohdaten so früh wie möglich freigeben
+
     rename_map = {date_col: "datum", velo_in_col: "velo_in"}
     if velo_out_col:
         rename_map[velo_out_col] = "velo_out"
     if standort_col:
         rename_map[standort_col] = "standort"
-    out = out.rename(columns=rename_map)
+    df = df.rename(columns=rename_map)
 
-    out = out.dropna(subset=["datum", "velo_in"])
-    out["datum"] = pd.to_datetime(out["datum"], errors="coerce")
-    out = out.dropna(subset=["datum"])
+    df = df.dropna(subset=["datum", "velo_in"])
+    df["datum"] = pd.to_datetime(df["datum"], errors="coerce")
+    df = df.dropna(subset=["datum"])
 
-    if "velo_out" not in out.columns:
-        out["velo_out"] = 0
-    out["velo_out"] = out["velo_out"].fillna(0)
-    out["velo_total"] = out["velo_in"] + out["velo_out"]
+    if "velo_out" not in df.columns:
+        df["velo_out"] = 0
+    df["velo_out"] = df["velo_out"].fillna(0)
+    df["velo_total"] = df["velo_in"] + df["velo_out"]
 
-    if "standort" not in out.columns:
-        out["standort"] = "ALL"
-    out["standort"] = out["standort"].astype(str)
+    if "standort" not in df.columns:
+        df["standort"] = "ALL"
+    df["standort"] = df["standort"].astype(str)
 
-    out["wochentag"] = out["datum"].dt.day_name()
-    out["uhrzeit"] = out["datum"].dt.strftime("%H:%M")
-    out["tag"] = out["datum"].dt.date
-    return out
+    df["wochentag"] = df["datum"].dt.day_name()
+    df["uhrzeit"] = df["datum"].dt.strftime("%H:%M")
+    df["tag"] = df["datum"].dt.date
+
+    # --- Verdichtung: nur noch die drei kleinen Ergebnistabellen behalten ---
+    loc_wd = (
+        df.groupby(["standort", "wochentag"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"), n=("velo_in", "size"))
+        .reset_index()
+    )
+    loc_tod = (
+        df.groupby(["standort", "uhrzeit"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"), n=("velo_in", "size"))
+        .reset_index()
+    )
+    daily = (
+        df.groupby(["standort", "tag"])
+        .agg(vi_sum=("velo_in", "sum"), vt_sum=("velo_total", "sum"))
+        .reset_index()
+    )
+    daily["wochentag"] = pd.to_datetime(daily["tag"]).dt.day_name()
+
+    locations = sorted(df["standort"].unique())
+    del df  # bereinigte Vollständige Tabelle ebenfalls freigeben
+
+    return {"loc_wd": loc_wd, "loc_tod": loc_tod, "daily": daily, "locations": locations}
 
 
-def filter_location(df: pd.DataFrame, location: str) -> pd.DataFrame:
+def _filter_loc(table: pd.DataFrame, location: str) -> pd.DataFrame:
     if location == "Alle Zählstellen":
-        return df
-    return df[df["standort"] == location]
+        return table
+    return table[table["standort"] == location]
 
 
 # ---------------------------------------------------------------------------
-# Aggregationen
+# Aggregationen (arbeiten auf den bereits verdichteten Tabellen)
 # ---------------------------------------------------------------------------
 
-def weekday_quarter_avg(df: pd.DataFrame, metric_col: str) -> pd.Series:
-    return df.groupby("wochentag")[metric_col].mean().reindex(WEEKDAY_ORDER)
+def weekday_quarter_avg(loc_wd: pd.DataFrame, location: str, sum_col: str) -> pd.Series:
+    df = _filter_loc(loc_wd, location)
+    g = df.groupby("wochentag")[[sum_col, "n"]].sum()
+    avg = g[sum_col] / g["n"]
+    return avg.reindex(WEEKDAY_ORDER)
 
 
-def weekday_daily_avg(df: pd.DataFrame, metric_col: str) -> pd.Series:
-    daily_sum = df.groupby("tag")[metric_col].sum()
+def time_of_day_avg(loc_tod: pd.DataFrame, location: str, sum_col: str) -> pd.Series:
+    df = _filter_loc(loc_tod, location)
+    g = df.groupby("uhrzeit")[[sum_col, "n"]].sum()
+    avg = g[sum_col] / g["n"]
+    return avg.sort_index()
+
+
+def weekday_daily_avg(daily: pd.DataFrame, location: str, sum_col: str) -> pd.Series:
+    df = _filter_loc(daily, location)
+    per_tag = df.groupby("tag")[sum_col].sum()
     wd_map = df.groupby("tag")["wochentag"].first()
-    combined = pd.DataFrame({"total": daily_sum, "wochentag": wd_map})
+    combined = pd.DataFrame({"total": per_tag, "wochentag": wd_map})
     return combined.groupby("wochentag")["total"].mean().reindex(WEEKDAY_ORDER)
 
 
-def time_of_day_avg(df: pd.DataFrame, metric_col: str) -> pd.Series:
-    return df.groupby("uhrzeit")[metric_col].mean().sort_index()
-
-
-def year_totals(df: pd.DataFrame, metric_col: str):
-    total = df[metric_col].sum()
+def year_totals(daily: pd.DataFrame, location: str, sum_col: str):
+    df = _filter_loc(daily, location)
+    total = df[sum_col].sum()
     days = df["tag"].nunique()
     avg_per_day = total / days if days > 0 else 0
     return total, days, avg_per_day
@@ -176,21 +219,20 @@ if not selected_years:
 datasets = {}
 with st.spinner("Lade Daten von Open Data Zürich ..."):
     for year in selected_years:
-        raw = load_year_raw(year)
-        if raw is None:
-            st.sidebar.error(f"{year}: Datensatz nicht verfügbar (noch nicht publiziert oder URL geändert)")
+        agg = load_year_aggregated(year)
+        if agg is None:
+            st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
             continue
-        try:
-            datasets[year] = prepare_year(raw)
-        except ValueError as e:
-            st.sidebar.error(f"{year}: {e}")
+        datasets[year] = agg
 
 if not datasets:
     st.error("Keine Daten laden können. Bitte später erneut versuchen oder Datenquelle prüfen.")
     st.stop()
 
-all_locations = sorted(set().union(*[set(df["standort"].unique()) for df in datasets.values()]))
+all_locations = sorted(set().union(*[set(d["locations"]) for d in datasets.values()]))
 location = st.sidebar.selectbox("Zählstelle", ["Alle Zählstellen"] + all_locations)
+
+sum_col = "vi_sum" if metric_col == "velo_in" else "vt_sum"
 
 # ---------------------------------------------------------------------------
 # Darstellung je nach gewählter Ansicht
@@ -199,9 +241,8 @@ location = st.sidebar.selectbox("Zählstelle", ["Alle Zählstellen"] + all_locat
 if view == "Jahrestotal":
     cols = st.columns(len(datasets))
     rows = []
-    for (year, df), col in zip(sorted(datasets.items()), cols):
-        filtered = filter_location(df, location)
-        total, days, avg_per_day = year_totals(filtered, metric_col)
+    for (year, agg), col in zip(sorted(datasets.items()), cols):
+        total, days, avg_per_day = year_totals(agg["daily"], location, sum_col)
         col.metric(f"{year}", f"{avg_per_day:,.0f} / Tag".replace(",", "'"))
         col.caption(f"Summe: {total:,.0f}".replace(",", "'") + f" · {days} erfasste Tage")
         rows.append({"Jahr": str(year), "Ø pro Tag": avg_per_day})
@@ -217,16 +258,15 @@ if view == "Jahrestotal":
 
 else:
     long_rows = []
-    for year, df in sorted(datasets.items()):
-        filtered = filter_location(df, location)
+    for year, agg in sorted(datasets.items()):
         if view == "Ø pro Viertelstunde nach Wochentag":
-            series = weekday_quarter_avg(filtered, metric_col)
+            series = weekday_quarter_avg(agg["loc_wd"], location, sum_col)
             x_label = "Wochentag"
         elif view == "Ø Tagestotal nach Wochentag":
-            series = weekday_daily_avg(filtered, metric_col)
+            series = weekday_daily_avg(agg["daily"], location, sum_col)
             x_label = "Wochentag"
         else:  # Tagesverlauf
-            series = time_of_day_avg(filtered, metric_col)
+            series = time_of_day_avg(agg["loc_tod"], location, sum_col)
             x_label = "Uhrzeit"
 
         for idx, value in series.items():
@@ -252,6 +292,8 @@ else:
     )
     fig.update_layout(yaxis_title=y_title)
     st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
 
 st.divider()
 st.caption(
