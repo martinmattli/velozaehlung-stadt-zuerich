@@ -81,22 +81,39 @@ def load_miv_daily(year: int):
     """Gibt dict mit 'daily' (DataFrame) und 'n_stations' (int) zurück, oder None."""
     url = MIV_CSV_URL_TEMPLATE.format(year=year)
     try:
-        raw = pd.read_csv(
+        chunks = pd.read_csv(
             url,
             usecols=["MessungDatZeit", "AnzFahrzeuge", "AnzFahrzeugeStatus", "ZSID"],
+            dtype={
+                "AnzFahrzeuge": "float32",
+                "AnzFahrzeugeStatus": "category",
+                "ZSID": "category",
+            },
             encoding="utf-8-sig",
             storage_options={"User-Agent": "Mozilla/5.0 (VeloDashboard/1.0)"},
+            chunksize=100_000,
         )
     except Exception:
         return None
 
-    raw = raw[raw["AnzFahrzeugeStatus"] == "Gemessen"].copy()
-    raw["tag"] = pd.to_datetime(raw["MessungDatZeit"], errors="coerce").dt.date
-    raw = raw.dropna(subset=["tag"])
-    n_stations = raw["ZSID"].nunique()
-    daily = raw.groupby("tag", as_index=False)["AnzFahrzeuge"].sum()
+    daily_parts = []
+    zsid_sets = []
+    try:
+        for chunk in chunks:
+            chunk = chunk[chunk["AnzFahrzeugeStatus"] == "Gemessen"]
+            chunk["tag"] = pd.to_datetime(chunk["MessungDatZeit"], errors="coerce").dt.date
+            chunk = chunk.dropna(subset=["tag"])
+            zsid_sets.append(set(chunk["ZSID"].unique()))
+            daily_parts.append(chunk.groupby("tag", as_index=False)["AnzFahrzeuge"].sum())
+    except Exception:
+        return None
+
+    if not daily_parts:
+        return None
+
+    daily = pd.concat(daily_parts).groupby("tag", as_index=False)["AnzFahrzeuge"].sum()
     daily = daily.rename(columns={"AnzFahrzeuge": "miv_total"})
-    del raw
+    n_stations = len(set().union(*zsid_sets))
     return {"daily": daily, "n_stations": n_stations}
 
 
