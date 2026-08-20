@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from supabase import create_client
 
 DATASET_PAGE_URL = (
     "https://data.stadt-zuerich.ch/dataset/"
@@ -14,6 +15,14 @@ DATASET_PAGE_URL = (
 CSV_URL_TEMPLATE = DATASET_PAGE_URL + "/download/{year}_verkehrszaehlungen_werte_fussgaenger_velo.csv"
 
 AVAILABLE_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025, 2026]
+SUPABASE_MAX_YEAR = 2025  # Jahre bis hier aus Supabase, ab 2026 von Open Data
+
+
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
 WEEKDAY_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 WEEKDAY_LABELS_DE = {
@@ -28,6 +37,31 @@ def find_column(columns, keywords):
             if kw in c.lower():
                 return c
     return None
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_year_from_supabase(year: int):
+    """Lädt aggregierte Velo-Jahresdaten aus Supabase (schnell, nur Tagesdaten)."""
+    try:
+        sb = get_supabase()
+        daily_resp = sb.table("velo_daily").select("standort,tag,vi_sum,vt_sum").eq("year", year).execute()
+        wd_resp    = sb.table("velo_loc_wd").select("standort,wochentag,vi_sum,vt_sum,n").eq("year", year).execute()
+        tod_resp   = sb.table("velo_loc_tod").select("standort,uhrzeit,vi_sum,vt_sum,n").eq("year", year).execute()
+    except Exception:
+        return None
+
+    if not daily_resp.data:
+        return None
+
+    daily  = pd.DataFrame(daily_resp.data)
+    loc_wd = pd.DataFrame(wd_resp.data)
+    loc_tod = pd.DataFrame(tod_resp.data)
+
+    daily["tag"] = pd.to_datetime(daily["tag"]).dt.date
+    daily["wochentag"] = pd.to_datetime(daily["tag"]).dt.day_name()
+    locations = sorted(daily["standort"].unique())
+
+    return {"loc_wd": loc_wd, "loc_tod": loc_tod, "daily": daily, "locations": locations}
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
@@ -206,11 +240,16 @@ if not selected_years:
     st.stop()
 
 datasets = {}
-with st.spinner("Lade Velozähldaten von Open Data Zürich …"):
+with st.spinner("Lade Velozähldaten …"):
     for year in selected_years:
-        agg = load_year_aggregated(year)
+        if year <= SUPABASE_MAX_YEAR:
+            agg = load_year_from_supabase(year)
+            if agg is None:
+                agg = load_year_aggregated(year)  # Fallback auf Open Data
+        else:
+            agg = load_year_aggregated(year)
         if agg is None:
-            st.sidebar.error(f"{year}: Datensatz nicht verfügbar oder Spalten nicht erkannt")
+            st.sidebar.error(f"{year}: Datensatz nicht verfügbar")
             continue
         datasets[year] = agg
 

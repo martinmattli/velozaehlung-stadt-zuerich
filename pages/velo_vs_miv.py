@@ -10,6 +10,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from supabase import create_client
 
 # ---------------------------------------------------------------------------
 # Konfiguration
@@ -26,6 +27,14 @@ MIV_CSV_URL_TEMPLATE = MIV_DATASET_PAGE_URL + "/download/sid_dav_verkehrszaehlun
 MIV_INDEX_BASE_YEAR = 2019
 
 AVAILABLE_YEARS = [2019, 2020, 2021, 2022, 2023, 2024, 2025]
+SUPABASE_MAX_YEAR = 2025
+
+
+@st.cache_resource
+def get_supabase():
+    url = st.secrets["supabase"]["url"]
+    key = st.secrets["supabase"]["key"]
+    return create_client(url, key)
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +47,42 @@ def find_column(columns, keywords):
             if kw in c.lower():
                 return c
     return None
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_velo_daily_supabase(year: int):
+    """Lädt Velo-Tagessummen aus Supabase (stadtweite Summe)."""
+    try:
+        sb = get_supabase()
+        resp = sb.table("velo_daily").select("tag,vi_sum").eq("year", year).execute()
+    except Exception:
+        return None
+    if not resp.data:
+        return None
+    df = pd.DataFrame(resp.data)
+    df["tag"] = pd.to_datetime(df["tag"]).dt.date
+    # Stadtweite Tagessumme über alle Standorte
+    daily = df.groupby("tag", as_index=False)["vi_sum"].sum().rename(columns={"vi_sum": "velo_total"})
+    # Anzahl Standorte
+    n_resp = sb.table("velo_daily").select("standort").eq("year", year).execute()
+    n_stations = len(set(r["standort"] for r in n_resp.data)) if n_resp.data else 0
+    return {"daily": daily, "n_stations": n_stations}
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def load_miv_daily_supabase(year: int):
+    """Lädt MIV-Tagessummen aus Supabase."""
+    try:
+        sb = get_supabase()
+        resp = sb.table("miv_daily").select("tag,miv_total,n_stations").eq("year", year).execute()
+    except Exception:
+        return None
+    if not resp.data:
+        return None
+    df = pd.DataFrame(resp.data)
+    df["tag"] = pd.to_datetime(df["tag"]).dt.date
+    n_stations = df["n_stations"].iloc[0] if len(df) > 0 else 0
+    return {"daily": df[["tag", "miv_total"]], "n_stations": int(n_stations)}
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
@@ -162,14 +207,18 @@ years_to_load = sorted(set(selected_years) | {MIV_INDEX_BASE_YEAR})
 velo_by_year = {}
 with st.spinner("Lade Velodaten …"):
     for y in years_to_load:
-        result = load_velo_daily(y)
+        result = load_velo_daily_supabase(y) if y <= SUPABASE_MAX_YEAR else None
+        if result is None:
+            result = load_velo_daily(y)  # Fallback auf Open Data
         if result is not None:
             velo_by_year[y] = result
 
 miv_by_year = {}
 with st.spinner("Lade MIV-Daten (Motorfahrzeuge) …"):
     for y in years_to_load:
-        result = load_miv_daily(y)
+        result = load_miv_daily_supabase(y) if y <= SUPABASE_MAX_YEAR else None
+        if result is None:
+            result = load_miv_daily(y)  # Fallback auf Open Data
         if result is not None:
             miv_by_year[y] = result
         elif y != MIV_INDEX_BASE_YEAR:
