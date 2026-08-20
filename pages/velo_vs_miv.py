@@ -54,7 +54,7 @@ def load_velo_daily_supabase(year: int):
     """Lädt Velo-Tagessummen aus Supabase (stadtweite Summe)."""
     try:
         sb = get_supabase()
-        resp = sb.table("velo_daily").select("tag,vi_sum").eq("year", year).execute()
+        resp = sb.table("velo_daily").select("tag,vi_sum,standort").eq("year", year).limit(100000).execute()
     except Exception:
         return None
     if not resp.data:
@@ -63,9 +63,9 @@ def load_velo_daily_supabase(year: int):
     df["tag"] = pd.to_datetime(df["tag"]).dt.date
     # Stadtweite Tagessumme über alle Standorte
     daily = df.groupby("tag", as_index=False)["vi_sum"].sum().rename(columns={"vi_sum": "velo_total"})
-    # Anzahl Standorte
-    n_resp = sb.table("velo_daily").select("standort").eq("year", year).execute()
-    n_stations = len(set(r["standort"] for r in n_resp.data)) if n_resp.data else 0
+    # Anzahl Standorte direkt aus den geladenen Daten
+    n_resp = None
+    n_stations = df["standort"].nunique()
     return {"daily": daily, "n_stations": n_stations}
 
 
@@ -74,7 +74,7 @@ def load_miv_daily_supabase(year: int):
     """Lädt MIV-Tagessummen aus Supabase."""
     try:
         sb = get_supabase()
-        resp = sb.table("miv_daily").select("tag,miv_total,n_stations").eq("year", year).execute()
+        resp = sb.table("miv_daily").select("tag,miv_total,n_stations").eq("year", year).limit(1000).execute()
     except Exception:
         return None
     if not resp.data:

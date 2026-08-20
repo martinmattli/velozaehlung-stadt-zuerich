@@ -44,9 +44,9 @@ def load_year_from_supabase(year: int):
     """Lädt aggregierte Velo-Jahresdaten aus Supabase (schnell, nur Tagesdaten)."""
     try:
         sb = get_supabase()
-        daily_resp = sb.table("velo_daily").select("standort,tag,vi_sum,vt_sum").eq("year", year).execute()
-        wd_resp    = sb.table("velo_loc_wd").select("standort,wochentag,vi_sum,vt_sum,n").eq("year", year).execute()
-        tod_resp   = sb.table("velo_loc_tod").select("standort,uhrzeit,vi_sum,vt_sum,n").eq("year", year).execute()
+        daily_resp = sb.table("velo_daily").select("standort,tag,vi_sum,vt_sum").eq("year", year).limit(100000).execute()
+        wd_resp    = sb.table("velo_loc_wd").select("standort,wochentag,vi_sum,vt_sum,n").eq("year", year).limit(50000).execute()
+        tod_resp   = sb.table("velo_loc_tod").select("standort,uhrzeit,vi_sum,vt_sum,n").eq("year", year).limit(50000).execute()
     except Exception:
         return None
 
