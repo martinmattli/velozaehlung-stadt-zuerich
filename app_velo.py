@@ -39,23 +39,38 @@ def find_column(columns, keywords):
     return None
 
 
+def _fetch_all(sb, table: str, columns: str, year: int, page_size: int = 1000) -> list:
+    """Lädt alle Zeilen einer Tabelle via Pagination."""
+    rows = []
+    offset = 0
+    while True:
+        resp = sb.table(table).select(columns).eq("year", year).range(offset, offset + page_size - 1).execute()
+        if not resp.data:
+            break
+        rows.extend(resp.data)
+        if len(resp.data) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_year_from_supabase(year: int):
     """Lädt aggregierte Velo-Jahresdaten aus Supabase (schnell, nur Tagesdaten)."""
     try:
         sb = get_supabase()
-        daily_resp = sb.table("velo_daily").select("standort,tag,vi_sum,vt_sum").eq("year", year).limit(100000).execute()
-        wd_resp    = sb.table("velo_loc_wd").select("standort,wochentag,vi_sum,vt_sum,n").eq("year", year).limit(50000).execute()
-        tod_resp   = sb.table("velo_loc_tod").select("standort,uhrzeit,vi_sum,vt_sum,n").eq("year", year).limit(50000).execute()
+        daily_rows = _fetch_all(sb, "velo_daily", "standort,tag,vi_sum,vt_sum", year)
+        wd_rows    = _fetch_all(sb, "velo_loc_wd", "standort,wochentag,vi_sum,vt_sum,n", year)
+        tod_rows   = _fetch_all(sb, "velo_loc_tod", "standort,uhrzeit,vi_sum,vt_sum,n", year)
     except Exception:
         return None
 
-    if not daily_resp.data:
+    if not daily_rows:
         return None
 
-    daily  = pd.DataFrame(daily_resp.data)
-    loc_wd = pd.DataFrame(wd_resp.data)
-    loc_tod = pd.DataFrame(tod_resp.data)
+    daily  = pd.DataFrame(daily_rows)
+    loc_wd = pd.DataFrame(wd_rows)
+    loc_tod = pd.DataFrame(tod_rows)
 
     daily["tag"] = pd.to_datetime(daily["tag"]).dt.date
     daily["wochentag"] = pd.to_datetime(daily["tag"]).dt.day_name()

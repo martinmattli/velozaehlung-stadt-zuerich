@@ -49,22 +49,35 @@ def find_column(columns, keywords):
     return None
 
 
+def _fetch_all(sb, table: str, columns: str, year: int, page_size: int = 1000) -> list:
+    """Lädt alle Zeilen einer Tabelle via Pagination."""
+    rows = []
+    offset = 0
+    while True:
+        resp = sb.table(table).select(columns).eq("year", year).range(offset, offset + page_size - 1).execute()
+        if not resp.data:
+            break
+        rows.extend(resp.data)
+        if len(resp.data) < page_size:
+            break
+        offset += page_size
+    return rows
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def load_velo_daily_supabase(year: int):
     """Lädt Velo-Tagessummen aus Supabase (stadtweite Summe)."""
     try:
         sb = get_supabase()
-        resp = sb.table("velo_daily").select("tag,vi_sum,standort").eq("year", year).limit(100000).execute()
+        rows = _fetch_all(sb, "velo_daily", "tag,vi_sum,standort", year)
     except Exception:
         return None
-    if not resp.data:
+    if not rows:
         return None
-    df = pd.DataFrame(resp.data)
+    df = pd.DataFrame(rows)
     df["tag"] = pd.to_datetime(df["tag"]).dt.date
     # Stadtweite Tagessumme über alle Standorte
     daily = df.groupby("tag", as_index=False)["vi_sum"].sum().rename(columns={"vi_sum": "velo_total"})
-    # Anzahl Standorte direkt aus den geladenen Daten
-    n_resp = None
     n_stations = df["standort"].nunique()
     return {"daily": daily, "n_stations": n_stations}
 
